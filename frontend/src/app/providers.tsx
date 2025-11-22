@@ -22,11 +22,9 @@ export function Providers({ children }: { children: React.ReactNode }) {
     <QueryClientProvider client={queryClient}>
       <SuiClientProvider networks={networkConfig} defaultNetwork="devnet">
         <WalletProvider>
-          <WalletLoadingGate>
             <WalletPersistenceManager>
               {children}
             </WalletPersistenceManager>
-          </WalletLoadingGate>
         </WalletProvider>
       </SuiClientProvider>
     </QueryClientProvider>

@@ -26,29 +26,23 @@ export default function AppLayout({
   const [activeSection, setActiveSection] = useState("builder");
   const [isMobile, setIsMobile] = useState(false);
   const [sidebarExpanded, setSidebarExpanded] = useState(false);
-  const [showModal, setShowModal] = useState(false);
 
   useEffect(() => {
-    // Check if mobile
+    // Mobile detection
     const checkMobile = () => {
       setIsMobile(window.innerWidth < 768);
     };
-
     checkMobile();
     window.addEventListener('resize', checkMobile);
 
-    // Check if we have an active session (from localStorage via dapp-kit)
-    const hasSession = typeof window !== "undefined" &&
-      (localStorage.getItem("sui_wallet") || getWalletCookie());
+    // Determine if we have a persisted wallet session (cookie or localStorage)
+    const hasSession = typeof window !== 'undefined' &&
+      (localStorage.getItem('sui_wallet') || getWalletCookie());
+    // Shorter loading: 0.5s if session, 0.1s otherwise
+    const loadingDuration = hasSession ? 500 : 100;
 
-    // Give dapp-kit time to restore the wallet from storage
-    const loadingDuration = hasSession ? 2000 : 800;
-
-    // Simulate initial loading
     const timer = setTimeout(() => {
       setIsLoading(false);
-      // Only show modal if still no account after loading
-      setShowModal(true);
     }, loadingDuration);
 
     return () => {
@@ -56,13 +50,6 @@ export default function AppLayout({
       window.removeEventListener('resize', checkMobile);
     };
   }, []);
-
-  // Once account is connected, hide the modal
-  useEffect(() => {
-    if (currentAccount) {
-      setShowModal(false);
-    }
-  }, [currentAccount]);
 
   // Save wallet to cookie when connected
   useEffect(() => {
@@ -74,59 +61,30 @@ export default function AppLayout({
   // Show loading state
   if (isLoading) {
     return (
-      <div 
+      <div
         className="min-h-screen bg-[#0a0f1e] flex items-center justify-center"
         style={{
           backgroundImage: `
-            linear-gradient(rgba(78, 222, 174, 0.02) 1px, transparent 1px),
-            linear-gradient(90deg, rgba(78, 222, 174, 0.02) 1px, transparent 1px)
+            linear-gradient(rgba(59, 130, 246, 0.02) 1px, transparent 1px),
+            linear-gradient(90deg, rgba(59, 130, 246, 0.02) 1px, transparent 1px)
           `,
           backgroundSize: '80px 80px',
         }}
       >
-        <motion.div
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          className="text-center space-y-8"
-        >
-          {/* Animated Loading Icon */}
-          <div className="relative w-32 h-32 mx-auto">
+        <div className="w-3/4 max-w-xl">
+          {/* Progress bar */}
+          <div className="h-2 bg-white/20 rounded-full overflow-hidden">
             <motion.div
-              animate={{ rotate: 360 }}
-              transition={{ duration: 3, repeat: Infinity, ease: "linear" }}
-              className="absolute inset-0 border-2 border-walrus-mint/40"
+              className="h-full bg-white"
+              initial={{ width: 0 }}
+              animate={{ width: "100%" }}
+              transition={{ duration: 0.5, ease: "linear", repeat: Infinity }}
             />
-            <motion.div
-              animate={{ rotate: -360 }}
-              transition={{ duration: 2, repeat: Infinity, ease: "linear" }}
-              className="absolute inset-4 border-2 border-walrus-mint/30"
-            />
-            <div className="absolute inset-0 flex items-center justify-center">
-              <motion.div
-                animate={{ scale: [1, 1.2, 1] }}
-                transition={{ duration: 2, repeat: Infinity }}
-                className="w-4 h-4 bg-walrus-mint rounded-full"
-              />
-            </div>
           </div>
-
-          {/* Loading Text */}
-          <div className="space-y-2">
-            <p className="text-walrus-mint font-pixel text-sm tracking-widest">
-              INITIALIZING SYSTEM
-            </p>
-            <div className="flex items-center justify-center gap-1">
-              {[0, 1, 2].map((i) => (
-                <motion.div
-                  key={i}
-                  animate={{ opacity: [0.3, 1, 0.3] }}
-                  transition={{ duration: 1.5, repeat: Infinity, delay: i * 0.2 }}
-                  className="w-2 h-2 bg-walrus-mint/60"
-                />
-              ))}
-            </div>
-          </div>
-        </motion.div>
+          <p className="mt-4 text-center text-white font-pixel text-2xl tracking-widest">
+            INITIALIZING SYSTEM
+          </p>
+        </div>
       </div>
     );
   }
@@ -193,7 +151,7 @@ export default function AppLayout({
   }
 
   // Show wallet modal only if loading is done and still no account
-  const showWalletModal = !isLoading && !currentAccount && showModal;
+  const showWalletModal = !isLoading && !currentAccount;
 
   return (
     <Box sx={{ display: 'flex', minHeight: '100vh', backgroundColor: '#0a0f1e' }}>
