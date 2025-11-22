@@ -6,9 +6,9 @@
  */
 
 import { Transaction } from "@mysten/sui/transactions";
-import { pool } from "navi-sdk/dist/address";
 import { FlashBorrowNode, FlashRepayNode } from "../../types/strategy";
 import { BaseFlashLoanAdapter, BorrowResult } from "./types";
+import { MAINNET_ADDRESSES, TESTNET_ADDRESSES } from "../../config/addresses";
 
 export class NaviAdapter extends BaseFlashLoanAdapter {
   readonly protocol = "NAVI";
@@ -20,29 +20,31 @@ export class NaviAdapter extends BaseFlashLoanAdapter {
     super();
   }
 
+  private getConfig() {
+    return this.network === "mainnet" ? MAINNET_ADDRESSES : TESTNET_ADDRESSES;
+  }
+
   borrow(tx: Transaction, node: FlashBorrowNode): BorrowResult {
+    const config = this.getConfig();
     // Get pool config for the asset
     const poolConfig = this.getPoolConfig(node.params.asset);
 
-    // Import the flashloan function from navi-sdk
-    // NOTE: The actual import and function call depends on the navi-sdk version
-    // This is a conceptual implementation based on documentation
-
-    // For Navi, we use the borrowFlashLoan function
-    // This returns [Balance<T>, FlashLoanReceipt]
     const amount = BigInt(node.params.amount);
 
     // Construct the PTB call for flash loan
+    // Based on Navi SDK implementation: flash_loan_with_ctx_v2
     const [balance, receipt] = tx.moveCall({
-      target: `${poolConfig.packageId}::flash_loan::borrow_flash_loan`,
+      target: `${config.NAVI.PACKAGE}::lending::flash_loan_with_ctx_v2`,
       arguments: [
+        tx.object(config.NAVI.FLASHLOAN_CONFIG),
         tx.object(poolConfig.poolId),
         tx.pure.u64(amount),
+        tx.object("0x05"), // System object required by Navi
       ],
       typeArguments: [node.params.asset],
     });
 
-    // Convert Balance to Coin if needed
+    // Convert Balance to Coin so it can be used in the strategy graph
     const coin = tx.moveCall({
       target: "0x2::coin::from_balance",
       arguments: [balance],
@@ -53,9 +55,11 @@ export class NaviAdapter extends BaseFlashLoanAdapter {
   }
 
   repay(tx: Transaction, node: FlashRepayNode, coin: any, receipt: any): void {
+    const config = this.getConfig();
     const poolConfig = this.getPoolConfig(node.params.asset);
 
-    // Convert Coin to Balance
+    // Convert Coin back to Balance for repayment
+    // Navi flash_repay expects Balance, mirroring the flash_loan output
     const balance = tx.moveCall({
       target: "0x2::coin::into_balance",
       arguments: [coin],
@@ -63,12 +67,15 @@ export class NaviAdapter extends BaseFlashLoanAdapter {
     });
 
     // Repay the flash loan
+    // Based on Navi SDK implementation: flash_repay_with_ctx
     tx.moveCall({
-      target: `${poolConfig.packageId}::flash_loan::repay_flash_loan`,
+      target: `${config.NAVI.PACKAGE}::lending::flash_repay_with_ctx`,
       arguments: [
+        tx.object("0x06"), // Clock
+        tx.object(config.NAVI.STORAGE),
         tx.object(poolConfig.poolId),
-        balance,
         receipt,
+        balance,
       ],
       typeArguments: [node.params.asset],
     });
@@ -77,28 +84,14 @@ export class NaviAdapter extends BaseFlashLoanAdapter {
   /**
    * Get pool configuration for a given asset
    */
-  private getPoolConfig(asset: string): any {
-    // Map asset type to Navi pool
-    // This is simplified - actual implementation needs proper pool lookup
-    const poolKey = this.assetToPoolKey(asset);
-    const poolObj = (pool as any)[poolKey];
+  private getPoolConfig(asset: string): { poolId: string; assetId: number; name: string } {
+    const config = this.getConfig();
+    const pool = config.NAVI.POOLS[asset as keyof typeof config.NAVI.POOLS];
 
-    if (!poolObj) {
-      throw new Error(`No Navi pool found for asset: ${asset}`);
+    if (!pool) {
+      throw new Error(`No Navi pool found for asset: ${asset}. Please add it to backend/src/config/addresses.ts`);
     }
 
-    return poolObj;
-  }
-
-  /**
-   * Convert asset type to Navi pool key
-   */
-  private assetToPoolKey(asset: string): string {
-    // Simplified mapping
-    if (asset === "0x2::sui::SUI") {
-      return "Sui";
-    }
-    // Add more mappings as needed
-    throw new Error(`Unsupported asset for Navi: ${asset}`);
+    return pool;
   }
 }
