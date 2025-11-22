@@ -9,6 +9,13 @@
  * INCENTIVE_V2: Legacy rewards system
  * INCENTIVE_V3: Current rewards system (recommended)
  */
+
+export interface PoolConfig {
+  poolId: string;
+  assetId: number;
+  name: string;
+}
+
 export const MAINNET_ADDRESSES = {
   NAVI: {
     PACKAGE: "0xee0041239b89564ce870a7dec5ddc5d114367ab94a1137e90aa0633cb76518e0",
@@ -64,3 +71,7 @@ export const MAINNET_ADDRESSES = {
     }
   }
 };
+
+// For now, use MAINNET_ADDRESSES as TESTNET_ADDRESSES
+// TODO: Add proper testnet addresses when available
+export const TESTNET_ADDRESSES = MAINNET_ADDRESSES;

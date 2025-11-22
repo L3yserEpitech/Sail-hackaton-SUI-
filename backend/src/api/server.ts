@@ -26,14 +26,15 @@ app.get('/api/health', (req, res) => {
 });
 
 // Get Supported Tokens (Testnet for now)
-import { TESTNET_ADDRESSES } from '../config/addresses';
+import { TESTNET_ADDRESSES, PoolConfig } from '../config/addresses';
 
 app.get('/api/tokens', (req, res) => {
   const tokens: Record<string, string> = {};
   
   // Extract tokens from NAVI Pools config
   Object.entries(TESTNET_ADDRESSES.NAVI.POOLS).forEach(([address, pool]) => {
-    tokens[pool.name] = address;
+    const poolConfig = pool as PoolConfig;
+    tokens[poolConfig.name] = address;
   });
 
   console.log(`[API] Returning ${Object.keys(tokens).length} tokens:`, Object.keys(tokens));
