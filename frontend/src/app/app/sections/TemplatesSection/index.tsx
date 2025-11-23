@@ -404,12 +404,21 @@ export function TemplatesSection() {
                     </div>
                   </div>
                 </div>
-                <button 
-                  onClick={() => setSelectedTemplate(null)}
-                  className="group p-2 hover:bg-red-500/10 border border-transparent hover:border-red-500/50 transition-all duration-300 shrink-0"
-                >
-                  <X size={24} className="text-gray-500 group-hover:text-red-400" />
-                </button>
+                <div className="flex items-center gap-2 shrink-0">
+                  <button 
+                    onClick={() => handleDelete(selectedTemplate.id)}
+                    className="group p-2 hover:bg-red-500/10 border border-transparent hover:border-red-500/50 transition-all duration-300"
+                    title="Delete Strategy"
+                  >
+                    <Trash2 size={20} className="text-gray-500 group-hover:text-red-400" />
+                  </button>
+                  <button 
+                    onClick={() => setSelectedTemplate(null)}
+                    className="group p-2 hover:bg-red-500/10 border border-transparent hover:border-red-500/50 transition-all duration-300"
+                  >
+                    <X size={24} className="text-gray-500 group-hover:text-red-400" />
+                  </button>
+                </div>
               </div>
 
               {/* Panel Content */}
@@ -537,15 +546,6 @@ export function TemplatesSection() {
                   </button>
                 </div>
                 
-                <div className="mt-6 flex justify-center">
-                   <button 
-                    className="flex items-center gap-2 text-red-500/70 hover:text-red-400 text-[10px] font-mono uppercase tracking-widest transition-colors hover:underline decoration-red-500/30 underline-offset-4"
-                    onClick={() => handleDelete(selectedTemplate.id)}
-                  >
-                    <Trash2 size={12} />
-                    Delete Strategy
-                  </button>
-                </div>
 
                 {/* Execution Steps in Footer */}
                 <AnimatePresence>
