@@ -1,247 +1,597 @@
 "use client";
 
-import { motion } from "framer-motion";
+import { motion, AnimatePresence } from "framer-motion";
 import { useState, useEffect } from "react";
-import { useCurrentAccount } from "@mysten/dapp-kit";
+import { useCurrentAccount, useSignAndExecuteTransaction } from "@mysten/dapp-kit";
+import { ExecutionConsole, Log, ExecutionStatus } from "./components/ExecutionConsole";
+import { ExecutionSteps } from "./components/ExecutionSteps";
+import { Transaction } from "@mysten/sui/transactions";
+import { Play, Edit, Trash2, Upload, Copy, Layers, Calendar, User, X, GripVertical, Loader2 } from "lucide-react";
 import type { Strategy } from "@/hooks/useWorkflows";
+import { api } from "@/services/api";
+import { useWorkflowActions } from "@/hooks/useWorkflows";
+import { PublishModal } from "../BuilderSection/components/PublishModal";
+import { Snackbar, Alert } from "@mui/material";
 
 export function TemplatesSection() {
   const currentAccount = useCurrentAccount();
   const [templates, setTemplates] = useState<Strategy[]>([]);
   const [selectedTemplate, setSelectedTemplate] = useState<Strategy | null>(null);
+  
+  // Execution State
+  const [executionLogs, setExecutionLogs] = useState<Log[]>([]);
+  const [executionStatus, setExecutionStatus] = useState<ExecutionStatus>('idle');
+  const [txDigest, setTxDigest] = useState<string | undefined>();
+  
+  // Publish State
+  const [publishModalOpen, setPublishModalOpen] = useState(false);
+  const [publishing, setPublishing] = useState(false);
+  const [notification, setNotification] = useState<{ type: 'success' | 'error', message: string } | null>(null);
+  const { uploadWorkflow } = useWorkflowActions();
+
+  const { mutate: signAndExecuteTransaction } = useSignAndExecuteTransaction();
+
+  const addLog = (message: string, type: Log['type'] = 'info') => {
+    setExecutionLogs(prev => [...prev, { timestamp: Date.now(), message, type }]);
+  };
 
   useEffect(() => {
-    // Charger les workflows depuis localStorage
     const loadTemplates = () => {
-      const stored = localStorage.getItem('purchased_workflows');
-      if (stored) {
+      const allStrategies: Strategy[] = [];
+
+      // 1. Load saved strategies
+      const savedStored = localStorage.getItem('saved_strategies');
+      if (savedStored) {
         try {
-          const parsed = JSON.parse(stored);
-          
-          // Normaliser les données au cas où certaines ont le wrapper { workflow: ... }
-          const normalized = parsed.map((item: any) => {
-            // Si l'item a une propriété 'workflow', extraire le workflow
-            if (item.workflow && !item.meta) {
-              return item.workflow;
-            }
-            return item;
-          });
-          
-          setTemplates(normalized);
-          
-          // Sauvegarder la version normalisée si nécessaire
-          if (JSON.stringify(normalized) !== JSON.stringify(parsed)) {
-            localStorage.setItem('purchased_workflows', JSON.stringify(normalized));
-          }
+          const parsed = JSON.parse(savedStored);
+          if (Array.isArray(parsed)) allStrategies.push(...parsed);
         } catch (err) {
-          console.error('Failed to parse templates:', err);
+          console.error('Failed to parse saved_strategies:', err);
         }
       }
+
+      // 2. Load purchased workflows
+      const purchasedStored = localStorage.getItem('purchased_workflows');
+      if (purchasedStored) {
+        try {
+          const parsed = JSON.parse(purchasedStored);
+          const normalized = parsed.map((item: any) => {
+            if (item.workflow && !item.meta) return item.workflow;
+            return item;
+          });
+          if (Array.isArray(normalized)) allStrategies.push(...normalized);
+        } catch (err) {
+          console.error('Failed to parse purchased_workflows:', err);
+        }
+      }
+
+      // Unique & Sort
+      const uniqueStrategies = Array.from(new Map(allStrategies.map(item => [item.id, item])).values());
+      uniqueStrategies.sort((a, b) => (b.meta.created_at || 0) - (a.meta.created_at || 0));
+
+      setTemplates(uniqueStrategies);
     };
 
     loadTemplates();
-
-    // Écouter les changements de localStorage
-    const handleStorageChange = () => {
-      loadTemplates();
-    };
-
+    const handleStorageChange = () => loadTemplates();
     window.addEventListener('storage', handleStorageChange);
     return () => window.removeEventListener('storage', handleStorageChange);
   }, []);
 
   const handleDelete = (workflowId: string) => {
-    const confirmed = window.confirm('Are you sure you want to delete this template?');
-    if (!confirmed) return;
+    if (!window.confirm('Are you sure you want to delete this strategy?')) return;
 
     const filtered = templates.filter(t => t.id !== workflowId);
     setTemplates(filtered);
-    localStorage.setItem('purchased_workflows', JSON.stringify(filtered));
+
+    // Update storages
+    ['saved_strategies', 'purchased_workflows'].forEach(key => {
+      const stored = localStorage.getItem(key);
+      if (stored) {
+        try {
+          const parsed = JSON.parse(stored);
+          const newStored = parsed.filter((t: any) => (t.workflow?.id || t.id) !== workflowId);
+          localStorage.setItem(key, JSON.stringify(newStored));
+        } catch (e) { console.error(e); }
+      }
+    });
     
-    if (selectedTemplate?.id === workflowId) {
-      setSelectedTemplate(null);
+    if (selectedTemplate?.id === workflowId) setSelectedTemplate(null);
+  };
+
+  const handleCopy = (template: Strategy) => {
+    navigator.clipboard.writeText(JSON.stringify(template, null, 2));
+    alert('Strategy JSON copied to clipboard!');
+  };
+
+  const handleRunStrategy = async () => {
+    if (!selectedTemplate || !currentAccount) {
+      alert("Please connect your wallet first");
+      return;
+    }
+
+    // Reset state
+    setExecutionStatus('building');
+    setExecutionLogs([]);
+    setTxDigest(undefined);
+    addLog(`Initializing strategy execution: ${selectedTemplate.meta.name}`, 'info');
+    addLog(`Network: Mainnet`, 'info');
+    addLog(`Sender: ${currentAccount.address}`, 'info');
+
+    try {
+      // 1. Build transaction
+      addLog("Building transaction on backend...", 'info');
+      const buildRes = await api.buildTransaction(selectedTemplate, currentAccount.address);
+      
+      if (!buildRes.success || !buildRes.transactionBytes) {
+        throw new Error(buildRes.error || "Failed to build transaction");
+      }
+      addLog("Transaction built successfully.", 'success');
+
+      // 2. Decode base64 to Uint8Array
+      const binaryString = atob(buildRes.transactionBytes);
+      const bytes = new Uint8Array(binaryString.length);
+      for (let i = 0; i < binaryString.length; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
+      }
+      addLog(`Transaction size: ${bytes.length} bytes`, 'info');
+
+      // 3. Sign and Execute
+      setExecutionStatus('signing');
+      addLog("Requesting wallet signature...", 'info');
+      
+      const tx = Transaction.from(bytes);
+
+      signAndExecuteTransaction(
+        {
+          transaction: tx,
+        },
+        {
+          onSuccess: (result) => {
+            console.log("Transaction executed:", result);
+            console.log(`SuiScan URL: https://suiscan.xyz/mainnet/tx/${result.digest}`);
+            
+            // Set executing status briefly before success
+            setExecutionStatus('executing');
+            addLog("Executing transaction on Sui Mainnet...", 'info');
+            
+            // Small delay to show executing state
+            setTimeout(() => {
+              setExecutionStatus('success');
+              setTxDigest(result.digest);
+              addLog("Transaction submitted to the network!", 'success');
+              addLog(`Digest: ${result.digest}`, 'success');
+              addLog("Execution completed successfully.", 'success');
+            }, 500);
+          },
+          onError: (error) => {
+            console.error("Execution failed:", error);
+            setExecutionStatus('error');
+            addLog(`Execution failed: ${error.message}`, 'error');
+          },
+        }
+      );
+    } catch (error: any) {
+      console.error("Run strategy error:", error);
+      setExecutionStatus('error');
+      addLog(`Error: ${error.message}`, 'error');
     }
   };
 
-  const handleUseTemplate = (template: Strategy) => {
-    // Copier le workflow dans le presse-papier
-    const workflowJson = JSON.stringify(template, null, 2);
-    navigator.clipboard.writeText(workflowJson);
-    alert('Template copied to clipboard!');
+  const handlePublishClick = () => {
+    if (!currentAccount) {
+      setNotification({ type: 'error', message: 'Please connect your wallet first' });
+      return;
+    }
+    setPublishModalOpen(true);
+  };
+
+  const handlePublish = async (data: { name: string; description: string; price: number; tags: string[] }) => {
+    if (!currentAccount || !selectedTemplate) return;
+
+    setPublishing(true);
+    try {
+      // Update the selected template's metadata with user input
+      const updatedStrategy: Strategy = {
+        ...selectedTemplate,
+        meta: {
+          ...selectedTemplate.meta,
+          name: data.name,
+          description: data.description,
+          tags: data.tags,
+          price_sui: data.price,
+          updated_at: Date.now()
+        }
+      };
+
+      // Call the uploadWorkflow function
+      await uploadWorkflow(updatedStrategy);
+      
+      setNotification({ type: 'success', message: 'Workflow published successfully!' });
+      setPublishModalOpen(false);
+      setSelectedTemplate(null);
+    } catch (err: any) {
+      setNotification({ type: 'error', message: err.message || 'Failed to publish workflow' });
+    } finally {
+      setPublishing(false);
+    }
   };
 
   return (
-    <motion.div
-      initial={{ opacity: 0, y: 20 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.5 }}
-    >
-      <div className="space-y-6">
-        <h1 className="text-4xl md:text-6xl font-pixel text-white tracking-wider">
-          MY TEMPLATES
+    <div className="h-full flex flex-col relative">
+      <div className="mb-8">
+        <h1 className="text-4xl font-pixel text-white tracking-wider mb-2">
+          STRATEGY FOLDER
         </h1>
+        <p className="text-gray-500 font-mono text-sm">
+          Manage and execute your DeFi strategies
+        </p>
+      </div>
 
-        <div className="pt-8">
-          {templates.length === 0 ? (
-            <div className="bg-walrus-mint/10 border-4 border-walrus-mint/40 p-8">
-              <p className="text-white font-pixel text-sm mb-4">
-                NO TEMPLATES YET
-              </p>
-              <p className="text-white/60 text-xs font-mono">
-                Purchase workflows from the marketplace to add them to your templates.
-              </p>
-            </div>
-          ) : (
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-              {/* Liste des templates */}
-              <div className="space-y-4">
-                {templates.map((template) => {
-                  // Vérifier que le template a une structure valide
-                  if (!template?.meta) {
-                    console.warn('Invalid template structure:', template);
-                    return null;
-                  }
-                  
-                  return (
-                    <motion.div
-                      key={template.id}
-                      initial={{ opacity: 0, x: -20 }}
-                      animate={{ opacity: 1, x: 0 }}
-                      whileHover={{ scale: 1.02 }}
-                      onClick={() => setSelectedTemplate(template)}
-                      className={`bg-walrus-mint/10 border-4 p-6 cursor-pointer transition-all ${
-                        selectedTemplate?.id === template.id
-                          ? 'border-walrus-mint'
-                          : 'border-walrus-mint/40 hover:border-walrus-mint/80'
-                      }`}
-                    >
-                      <h3 className="text-2xl font-pixel text-walrus-mint mb-2">
-                        {template.meta.name}
-                      </h3>
-                      
-                      <p className="text-white/80 text-sm font-mono mb-3">
-                        {template.meta.description}
-                      </p>
+      {templates.length === 0 ? (
+        <div className="flex-1 flex items-center justify-center border-2 border-dashed border-gray-800 bg-[#0a0a0a]/50">
+          <div className="text-center">
+            <Layers size={48} className="mx-auto text-gray-700 mb-4" />
+            <p className="text-gray-500 font-mono text-sm mb-2">NO STRATEGIES FOUND</p>
+            <p className="text-gray-600 text-xs font-mono">Create one in the Builder or buy from Marketplace</p>
+          </div>
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 overflow-y-auto pb-10 custom-scrollbar">
+          {templates.map((template, index) => {
+            // Generate a deterministic color based on ID for visual variety
+            const colors = [
+              { border: "#a855f7", glow: "#a855f740", text: "#c084fc" }, // Purple
+              { border: "#3b82f6", glow: "#3b82f640", text: "#60a5fa" }, // Blue
+              { border: "#10b981", glow: "#10b98140", text: "#34d399" }, // Emerald
+              { border: "#f59e0b", glow: "#f59e0b40", text: "#fbbf24" }, // Amber
+            ];
+            const color = colors[index % colors.length];
 
-                      <div className="flex flex-wrap gap-2 mb-3">
-                        {template.meta.tags?.map((tag) => (
-                          <span
-                            key={tag}
-                            className="px-2 py-1 bg-walrus-mint/20 border border-walrus-mint/40 text-walrus-mint text-xs font-pixel"
+            return (
+              <motion.div
+                key={template.id}
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: index * 0.05 }}
+                onClick={() => setSelectedTemplate(template)}
+                className="relative group cursor-pointer"
+              >
+                <div 
+                  className="bg-[#0a0a0a] border-2 p-5 relative overflow-hidden transition-all duration-200 hover:border-opacity-100 h-full flex flex-col"
+                  style={{
+                    borderColor: `${color.border}50`,
+                  }}
+                >
+                  {/* Top Corner Accents */}
+                  <div className="absolute top-0 left-0 w-3 h-3" style={{ backgroundColor: color.border }} />
+                  <div className="absolute top-0 right-0 w-3 h-3" style={{ backgroundColor: color.border }} />
+
+                  {/* Hover Glow */}
+                  <div 
+                    className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none"
+                    style={{
+                      boxShadow: `inset 0 0 40px ${color.glow}`,
+                    }}
+                  />
+
+                  {/* Header */}
+                  <div className="flex items-center justify-between mb-4 pb-3 border-b border-gray-800 relative z-10">
+                    <div className="flex items-center gap-3">
+                      <div 
+                        className="p-2 border-2"
+                        style={{
+                          borderColor: color.border,
+                          backgroundColor: '#000',
+                        }}
+                      >
+                        <Layers size={20} style={{ color: color.text }} strokeWidth={2.5} />
+                      </div>
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <span 
+                            className="font-mono text-sm font-bold uppercase tracking-wider"
+                            style={{ color: color.text }}
                           >
-                            {tag}
+                            STRATEGY
                           </span>
-                        ))}
-                      </div>
-
-                      <div className="flex justify-between items-center pt-3 border-t border-walrus-mint/20">
-                        <span className="text-white/60 text-xs font-mono">
-                          {template.nodes?.length || 0} nodes • {template.edges?.length || 0} edges
-                        </span>
-                        
-                        <div className="flex gap-2">
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleUseTemplate(template);
+                          <span 
+                            className="px-2 py-0.5 border font-mono text-[10px] font-bold"
+                            style={{
+                              borderColor: color.border,
+                              backgroundColor: '#000',
+                              color: color.text,
                             }}
-                          className="px-3 py-1 bg-walrus-mint/20 border border-walrus-mint text-walrus-mint text-xs font-pixel hover:bg-walrus-mint hover:text-black transition-colors"
-                        >
-                          COPY
-                        </button>
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            handleDelete(template.id);
-                          }}
-                          className="px-3 py-1 bg-red-500/20 border border-red-500 text-red-500 text-xs font-pixel hover:bg-red-500 hover:text-white transition-colors"
-                        >
-                          DELETE
-                        </button>
-                      </div>
-                    </div>
-                  </motion.div>
-                );
-                })}
-              </div>
-
-              {/* Détails du template sélectionné */}
-              <div className="lg:sticky lg:top-6 h-fit">
-                {selectedTemplate ? (
-                  <div className="bg-walrus-mint/10 border-4 border-walrus-mint p-6">
-                    <h3 className="text-xl font-pixel text-walrus-mint mb-4">
-                      TEMPLATE DETAILS
-                    </h3>
-
-                    <div className="space-y-4">
-                      <div>
-                        <p className="text-walrus-mint/80 text-xs font-pixel mb-1">
-                          AUTHOR
-                        </p>
-                        <p className="text-white text-sm font-mono break-all">
-                          {selectedTemplate.meta.author}
-                        </p>
-                      </div>
-
-                      <div>
-                        <p className="text-walrus-mint/80 text-xs font-pixel mb-1">
-                          VERSION
-                        </p>
-                        <p className="text-white text-sm font-mono">
-                          {selectedTemplate.version}
-                        </p>
-                      </div>
-
-                      <div>
-                        <p className="text-walrus-mint/80 text-xs font-pixel mb-1">
-                          CREATED
-                        </p>
-                        <p className="text-white text-sm font-mono">
-                          {new Date(selectedTemplate.meta.created_at).toLocaleString()}
-                        </p>
-                      </div>
-
-                      <div>
-                        <p className="text-walrus-mint/80 text-xs font-pixel mb-2">
-                          NODES ({selectedTemplate.nodes.length})
-                        </p>
-                        <div className="space-y-2 max-h-64 overflow-y-auto">
-                          {selectedTemplate.nodes.map((node: any) => (
-                            <div
-                              key={node.id}
-                              className="bg-black/50 border border-walrus-mint/40 p-2"
-                            >
-                              <p className="text-walrus-mint text-xs font-pixel">
-                                {node.label || node.id}
-                              </p>
-                              <p className="text-white/60 text-xs font-mono">
-                                {node.type} • {node.protocol}
-                              </p>
-                            </div>
-                          ))}
+                          >
+                            #{index + 1}
+                          </span>
+                        </div>
+                        <div className="font-mono text-[9px] text-gray-600 mt-0.5">
+                          ID: {template.id.slice(0, 8).toUpperCase()}
                         </div>
                       </div>
-
-                      <button
-                        onClick={() => handleUseTemplate(selectedTemplate)}
-                        className="w-full px-4 py-3 bg-walrus-mint/20 border-2 border-walrus-mint hover:bg-walrus-mint hover:text-black transition-colors font-pixel text-sm"
-                      >
-                        COPY TO CLIPBOARD
-                      </button>
                     </div>
                   </div>
-                ) : (
-                  <div className="bg-walrus-mint/10 border-4 border-walrus-mint/40 p-8">
-                    <p className="text-white/60 font-pixel text-sm text-center">
-                      SELECT A TEMPLATE TO VIEW DETAILS
+
+                  {/* Content */}
+                  <div className="flex-1 relative z-10">
+                    <h3 className="font-mono text-lg font-bold text-white mb-2 line-clamp-1">
+                      {template.meta.name || "Untitled Strategy"}
+                    </h3>
+                    <p className="text-gray-500 text-xs font-mono line-clamp-3 mb-4">
+                      {template.meta.description || "No description provided."}
+                    </p>
+                    
+                    <div className="flex flex-wrap gap-2 mt-auto">
+                      {template.meta.tags?.slice(0, 3).map(tag => (
+                        <span key={tag} className="px-2 py-1 bg-gray-900 border border-gray-800 text-[10px] text-gray-400 font-mono uppercase">
+                          {tag}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Bottom Corners on Hover */}
+                  <motion.div 
+                    className="absolute bottom-0 left-0 w-3 h-3 opacity-0 group-hover:opacity-100 transition-opacity" 
+                    style={{ backgroundColor: color.border }} 
+                  />
+                  <motion.div 
+                    className="absolute bottom-0 right-0 w-3 h-3 opacity-0 group-hover:opacity-100 transition-opacity" 
+                    style={{ backgroundColor: color.border }} 
+                  />
+                </div>
+              </motion.div>
+            );
+          })}
+        </div>
+      )}
+      
+      {/* Slide-in Details Panel */}
+      <AnimatePresence>
+        {selectedTemplate && (
+          <>
+            {/* Backdrop */}
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => {
+                if (executionStatus === 'building' || executionStatus === 'signing' || executionStatus === 'executing') {
+                  if (!window.confirm("Execution in progress. Are you sure you want to close?")) return;
+                }
+                setSelectedTemplate(null);
+                setExecutionStatus('idle');
+              }}
+              className="fixed inset-0 bg-black/80 backdrop-blur-sm z-40"
+            />
+
+            {/* Panel */}
+            <motion.div
+              initial={{ x: "100%" }}
+              animate={{ x: 0 }}
+              exit={{ x: "100%" }}
+              transition={{ type: "spring", damping: 30, stiffness: 300 }}
+              className="fixed right-0 top-0 bottom-0 w-full max-w-2xl bg-[#050a14] border-l border-blue-500/30 z-50 shadow-[0_0_50px_rgba(0,0,0,0.8)] flex flex-col"
+            >
+              {/* Decorative Background Grid */}
+              <div className="absolute inset-0 bg-[linear-gradient(rgba(18,24,38,0.5)_1px,transparent_1px),linear-gradient(90deg,rgba(18,24,38,0.5)_1px,transparent_1px)] bg-[size:20px_20px] pointer-events-none opacity-20" />
+
+              {/* Panel Header */}
+              <div className="p-8 border-b border-white/10 flex justify-between items-start bg-[#050a14]/90 backdrop-blur relative z-10">
+                <div>
+                  <div className="flex items-center gap-3 mb-3">
+                    <div className="px-2 py-1 bg-blue-500/10 border border-blue-500/30 text-[10px] font-mono text-blue-400 uppercase tracking-wider">
+                      Strategy Protocol
+                    </div>
+                    {selectedTemplate.version && (
+                      <div className="px-2 py-1 bg-purple-500/10 border border-purple-500/30 text-[10px] font-mono text-purple-400 uppercase tracking-wider">
+                        v{selectedTemplate.version}
+                      </div>
+                    )}
+                  </div>
+                  <h2 className="text-3xl font-pixel text-transparent bg-clip-text bg-gradient-to-r from-white to-gray-400 mb-4 tracking-wide">
+                    {selectedTemplate.meta.name}
+                  </h2>
+                  <div className="flex items-center gap-6 text-xs font-mono text-gray-500">
+                    <div className="flex items-center gap-2">
+                      <User size={14} className="text-blue-500" />
+                      <span className="text-gray-400">{selectedTemplate.meta.author || "Anonymous"}</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Calendar size={14} className="text-blue-500" />
+                      <span className="text-gray-400">{new Date(selectedTemplate.meta.created_at).toLocaleDateString()}</span>
+                    </div>
+                  </div>
+                </div>
+                <button 
+                  onClick={() => setSelectedTemplate(null)}
+                  className="group p-2 hover:bg-red-500/10 border border-transparent hover:border-red-500/50 transition-all duration-300"
+                >
+                  <X size={24} className="text-gray-500 group-hover:text-red-400" />
+                </button>
+              </div>
+
+              {/* Panel Content */}
+              <div className="flex-1 overflow-y-auto p-8 custom-scrollbar flex flex-col gap-8 relative z-10">
+                
+
+
+                {/* Description Box */}
+                <div className="relative group">
+                  <div className="absolute -inset-0.5 bg-gradient-to-r from-blue-500/20 to-purple-500/20 rounded opacity-50 group-hover:opacity-100 transition duration-500 blur"></div>
+                  <div className="relative bg-[#0a0f1e] border border-white/10 p-6">
+                    <div className="absolute top-0 left-0 w-1 h-full bg-blue-500" />
+                    <h3 className="font-mono text-[10px] text-blue-400 uppercase mb-3 tracking-widest flex items-center gap-2">
+                      <span className="w-2 h-2 bg-blue-500 rounded-full animate-pulse" />
+                      System Description
+                    </h3>
+                    <p className="text-sm text-gray-300 font-mono leading-relaxed">
+                      {selectedTemplate.meta.description || "No description provided for this strategy."}
                     </p>
                   </div>
-                )}
+                </div>
+
+                {/* Stats Grid */}
+                <div className="grid grid-cols-3 gap-4">
+                  {[
+                    { label: "Nodes", value: selectedTemplate.nodes.length, icon: Layers },
+                    { label: "Edges", value: selectedTemplate.edges.length, icon: GripVertical },
+                    { label: "Complexity", value: "LOW", icon: Layers } // Placeholder logic
+                  ].map((stat, i) => (
+                    <div key={i} className="bg-[#0a0f1e] border border-white/5 p-4 relative group hover:border-blue-500/30 transition-colors">
+                      {/* Corner Accents */}
+                      <div className="absolute top-0 left-0 w-2 h-2 border-l border-t border-white/20 group-hover:border-blue-500 transition-colors" />
+                      <div className="absolute bottom-0 right-0 w-2 h-2 border-r border-b border-white/20 group-hover:border-blue-500 transition-colors" />
+                      
+                      <div className="flex justify-between items-start mb-2">
+                        <stat.icon size={14} className="text-gray-600 group-hover:text-blue-400 transition-colors" />
+                        <div className="text-[10px] text-gray-600 font-mono uppercase tracking-wider">{stat.label}</div>
+                      </div>
+                      <div className="text-2xl font-mono text-white font-bold">{stat.value}</div>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Execution Sequence */}
+                <div>
+                  <h3 className="font-mono text-sm text-white uppercase mb-6 flex items-center gap-2 border-b border-white/10 pb-2">
+                    <Layers size={16} className="text-blue-500" />
+                    Execution Sequence
+                  </h3>
+                  <div className="relative space-y-4 pl-4">
+                    {/* Circuit Line */}
+                    <div className="absolute left-[23px] top-4 bottom-4 w-0.5 bg-gradient-to-b from-blue-500/50 via-purple-500/50 to-transparent" />
+
+                    {selectedTemplate.nodes.map((node: any, i: number) => (
+                      <div key={i} className="relative flex items-center gap-4 group">
+                        {/* Node Number */}
+                        <div className="relative z-10 w-12 h-12 flex shrink-0 items-center justify-center bg-[#0a0f1e] border border-white/10 group-hover:border-blue-500 group-hover:shadow-[0_0_15px_rgba(59,130,246,0.3)] transition-all duration-300">
+                          <span className="font-pixel text-xs text-gray-500 group-hover:text-blue-400">{i + 1}</span>
+                        </div>
+
+                        {/* Node Card */}
+                        <div className="flex-1 bg-[#0a0f1e] border border-white/5 p-4 group-hover:bg-white/[0.02] group-hover:border-blue-500/30 transition-all duration-300 relative overflow-hidden">
+                          {/* Scanline effect on hover */}
+                          <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/5 to-transparent -translate-x-full group-hover:animate-shimmer pointer-events-none" />
+                          
+                          <div className="flex justify-between items-start">
+                            <div>
+                              <div className="text-xs font-mono text-blue-400 mb-1">{node.protocol}</div>
+                              <div className="text-sm font-bold font-mono text-white tracking-wide">{node.type}</div>
+                            </div>
+                            {/* Params Preview */}
+                            <div className="text-right">
+                              {node.params.amount && (
+                                <div className="text-xs font-mono text-emerald-400 bg-emerald-500/10 px-2 py-1 rounded border border-emerald-500/20">
+                                  {(parseInt(node.params.amount) / 1_000_000_000).toFixed(2)} SUI
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
               </div>
-            </div>
-          )}
-        </div>
-      </div>
-    </motion.div>
+
+              {/* Panel Footer Actions */}
+              <div className="p-8 border-t border-white/10 bg-[#050a14] relative z-20">
+                <div className="grid grid-cols-2 gap-4">
+                  <button 
+                    className="col-span-2 relative overflow-hidden group bg-blue-600 hover:bg-blue-500 text-white p-4 font-mono text-sm font-bold transition-all uppercase tracking-wider disabled:opacity-50 disabled:cursor-not-allowed"
+                    onClick={handleRunStrategy}
+                    disabled={executionStatus === 'building' || executionStatus === 'signing' || executionStatus === 'executing'}
+                  >
+                    <div className="absolute inset-0 bg-[url('https://grainy-gradients.vercel.app/noise.svg')] opacity-20" />
+                    <div className="relative flex items-center justify-center gap-3">
+                      {executionStatus === 'idle' || executionStatus === 'success' || executionStatus === 'error' ? (
+                        <>
+                          <Play size={18} className="fill-current" />
+                          Run Strategy
+                        </>
+                      ) : (
+                        <>
+                          <Loader2 size={18} className="animate-spin" />
+                          Running...
+                        </>
+                      )}
+                    </div>
+                  </button>
+                  
+                  <button 
+                    className="flex items-center justify-center gap-2 bg-transparent border border-white/10 hover:border-white/30 hover:bg-white/5 text-gray-300 p-3 font-mono text-xs font-bold transition-all uppercase group"
+                    onClick={() => alert("Edit functionality coming soon!")}
+                  >
+                    <Edit size={16} className="group-hover:text-blue-400 transition-colors" />
+                    Edit
+                  </button>
+                  
+                  <button 
+                    className="flex items-center justify-center gap-2 bg-transparent border border-white/10 hover:border-white/30 hover:bg-white/5 text-gray-300 p-3 font-mono text-xs font-bold transition-all uppercase group"
+                    onClick={handlePublishClick}
+                  >
+                    <Upload size={16} className="group-hover:text-purple-400 transition-colors" />
+                    Publish
+                  </button>
+                </div>
+                
+                <div className="mt-6 flex justify-center">
+                   <button 
+                    className="flex items-center gap-2 text-red-500/70 hover:text-red-400 text-[10px] font-mono uppercase tracking-widest transition-colors hover:underline decoration-red-500/30 underline-offset-4"
+                    onClick={() => handleDelete(selectedTemplate.id)}
+                  >
+                    <Trash2 size={12} />
+                    Delete Strategy
+                  </button>
+                </div>
+
+                {/* Execution Steps in Footer */}
+                <AnimatePresence>
+                  {executionStatus !== 'idle' && (
+                    <motion.div
+                      initial={{ opacity: 0, height: 0, marginTop: 0 }}
+                      animate={{ opacity: 1, height: 'auto', marginTop: 24 }}
+                      exit={{ opacity: 0, height: 0, marginTop: 0 }}
+                      className="overflow-hidden"
+                    >
+                      <ExecutionSteps 
+                        logs={executionLogs} 
+                        status={executionStatus} 
+                        txDigest={txDigest}
+                        onClose={() => setExecutionStatus('idle')}
+                      />
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+              </div>
+            </motion.div>
+          </>
+        )}
+      </AnimatePresence>
+
+      <PublishModal
+        open={publishModalOpen}
+        onClose={() => setPublishModalOpen(false)}
+        onPublish={handlePublish}
+        loading={publishing}
+      />
+
+      <Snackbar 
+        open={!!notification} 
+        autoHideDuration={6000} 
+        onClose={() => setNotification(null)}
+        anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
+      >
+        <Alert 
+          onClose={() => setNotification(null)} 
+          severity={notification?.type} 
+          sx={{ width: '100%' }}
+        >
+          {notification?.message}
+        </Alert>
+      </Snackbar>
+    </div>
   );
 }

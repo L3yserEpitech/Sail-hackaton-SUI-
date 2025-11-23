@@ -1,7 +1,8 @@
 "use client";
 
 import { useState, useEffect } from 'react';
-import { useCurrentAccount, useSignPersonalMessage } from '@mysten/dapp-kit';
+import { useCurrentAccount, useSignPersonalMessage, useSignTransaction, useSuiClient } from '@mysten/dapp-kit';
+import { Transaction } from '@mysten/sui/transactions';
 
 const API_BASE_URL = 'http://localhost:8000/api';
 
@@ -12,7 +13,6 @@ export interface WorkflowMetadata {
   author: string;
   description: string;
   tags: string[];
-  price_sui: number;
   created_at: number;
   purchaseCount: number;
   createdAt: number;
@@ -68,6 +68,8 @@ export function useWorkflows() {
 export function useWorkflowActions() {
   const currentAccount = useCurrentAccount();
   const { mutateAsync: signPersonalMessage } = useSignPersonalMessage();
+  const { mutateAsync: signTransaction } = useSignTransaction();
+  const suiClient = useSuiClient();
 
   const uploadWorkflow = async (strategy: Strategy) => {
     try {
@@ -89,6 +91,86 @@ export function useWorkflowActions() {
     }
   };
 
+  const payForWhitelist = async () => {
+    if (!currentAccount) {
+      throw new Error('Wallet not connected');
+    }
+
+    try {
+      console.log('💰 Starting whitelist payment process...');
+      
+      // 1. Build payment transaction
+      console.log('📝 Building payment transaction...');
+      const buildResponse = await fetch(`${API_BASE_URL}/seal/build-whitelist-payment`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          address: currentAccount.address,
+        }),
+      });
+
+      const buildResult = await buildResponse.json();
+      
+      if (!buildResult.success) {
+        throw new Error(buildResult.error || 'Failed to build payment transaction');
+      }
+
+      console.log('💵 Whitelist Price:', buildResult.data.price_sui, 'SUI');
+
+      // 2. Sign and execute payment
+      console.log('🖊️ Please sign the payment transaction...');
+      const txBytes = new Uint8Array(buildResult.data.transactionBytes);
+      
+      // Reconstruct the transaction from bytes
+      const transaction = Transaction.from(txBytes);
+      
+      const signedTx = await signTransaction({
+        transaction,
+      });
+
+      console.log('📡 Processing payment...');
+      const paymentResult = await suiClient.executeTransactionBlock({
+        transactionBlock: signedTx.bytes,
+        signature: signedTx.signature,
+        options: {
+          showEffects: true,
+        },
+      });
+
+      if (!paymentResult.effects || paymentResult.effects.status.status !== 'success') {
+        const errorDetail = paymentResult.effects?.status.error || 'Unknown error';
+        console.error('❌ Transaction failed on-chain:', errorDetail);
+        throw new Error(`Payment transaction failed: ${errorDetail}`);
+      }
+
+      console.log('✅ Payment successful! TX:', paymentResult.digest);
+
+      // 3. Confirm payment
+      console.log('🔐 Confirming whitelist payment...');
+      const confirmResponse = await fetch(`${API_BASE_URL}/seal/confirm-whitelist-payment`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          address: currentAccount.address,
+          transactionDigest: paymentResult.digest,
+        }),
+      });
+
+      const confirmResult = await confirmResponse.json();
+      
+      if (!confirmResult.success) {
+        throw new Error(confirmResult.error || 'Failed to confirm payment');
+      }
+
+      console.log('✅ Successfully added to whitelist!');
+
+      return confirmResult.data;
+    } catch (error: any) {
+      console.error('❌ Whitelist payment error:', error);
+      throw new Error(`Failed to pay for whitelist: ${error.message}`);
+    }
+  };
+
   const purchaseWorkflow = async (workflowId: string) => {
     if (!currentAccount) {
       throw new Error('Wallet not connected');
@@ -96,8 +178,9 @@ export function useWorkflowActions() {
 
     try {
       console.log('🛒 Purchasing workflow:', workflowId);
+      console.log('   Note: You must be in the whitelist (paid 0.5 SUI) to decrypt it');
       
-      // Call purchase API - backend will add user to whitelist on-chain
+      // Call purchase API - just marks workflow as owned locally
       const response = await fetch(`${API_BASE_URL}/workflows/purchase`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -114,9 +197,7 @@ export function useWorkflowActions() {
       }
 
       console.log('✅ Workflow purchased successfully!');
-      if (result.data.transactionDigest) {
-        console.log('📝 Transaction:', result.data.transactionDigest);
-      }
+      console.log('   You can now decrypt it (whitelist will be checked on-chain)');
 
       return result.data;
     } catch (error: any) {
@@ -199,10 +280,12 @@ export function useWorkflowActions() {
       });
 
       const decryptResult = await decryptResponse.json();
-      
+
       if (!decryptResult.success) {
         console.error('❌ Decrypt failed:', decryptResult);
-        throw new Error(decryptResult.error || 'Decryption failed');
+        // Show the backend's detailed message if available
+        const errorMsg = decryptResult.message || decryptResult.error || 'Decryption failed';
+        throw new Error(errorMsg);
       }
 
       console.log('✅ Workflow decrypted successfully!');
@@ -237,6 +320,7 @@ export function useWorkflowActions() {
 
   return {
     uploadWorkflow,
+    payForWhitelist,
     purchaseWorkflow,
     decryptWorkflow,
     getOwnedWorkflows,
