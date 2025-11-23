@@ -7,6 +7,7 @@ import { useState } from "react";
 import "@mysten/dapp-kit/dist/index.css";
 import { WalletPersistenceManager } from "@/components/WalletPersistenceManager";
 import { WalletLoadingGate } from "@/components/WalletLoadingGate";
+import { RegisterEnokiWallets } from "@/components/RegisterEnokiWallets";
 
 const { networkConfig } = createNetworkConfig({
   localnet: { url: getFullnodeUrl("localnet") },
@@ -21,6 +22,7 @@ export function Providers({ children }: { children: React.ReactNode }) {
   return (
     <QueryClientProvider client={queryClient}>
       <SuiClientProvider networks={networkConfig} defaultNetwork="mainnet">
+        <RegisterEnokiWallets />
         <WalletProvider>
             <WalletPersistenceManager>
               {children}
